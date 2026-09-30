@@ -1,0 +1,38 @@
+name: automated check (id probe)
+
+on:
+  schedule:
+    # 15分間隔。ID探索方式は1回あたり複数リクエストを送るため、他の監視より間隔を空けている
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install dependencies
+        run: pip install -r requirements.txt
+
+      - name: run check
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          ID_PROBE_TARGETS_JSON: ${{ secrets.ID_PROBE_TARGETS_JSON }}
+        run: python monitor.py
+
+      - name: commit updated state
+        run: |
+          git config user.name "auto-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "update state (id probe)"
+          git pull --rebase --autostash origin main
+          git push
