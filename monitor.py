@@ -164,60 +164,69 @@ def run_single_page_style(new_state: dict, notifications: list) -> bool:
     return seen_any
 
 
-# ---- 方式3: ID探索方式(実験的) ----
+# ---- 方式3: ID探索方式(実験的・自動追従) ----
 
 def run_id_probe_style(new_state: dict, notifications: list) -> bool:
-    """基準IDの前後を実際に1件ずつ取得し、キーワードが含まれるものだけ在庫判定する。
-    存在しないID(404等)は静かにスキップする。"""
+    """前回確認できた最新IDの続きから連番を実際に取得し、キーワードが含まれる
+    ものだけ在庫判定する。存在しないID(404等)が一定数連続したら打ち切る。"""
     seen_any = False
     for ti, target in enumerate(ID_PROBE_TARGETS, start=1):
         template = target.get("url_template")
         base_id = target.get("base_id")
-        range_before = int(target.get("range_before", 0))
-        range_after = int(target.get("range_after", 20))
         keywords = target.get("keywords", [])
         markers = target.get("out_of_stock_markers", [])
         name_prefix = target.get("name", f"ID探索対象{ti}")
+        miss_limit = int(target.get("miss_limit", 8))
+        max_requests = int(target.get("max_requests_per_run", 300))
 
         if not template or base_id is None:
             continue
 
-        checked = 0
+        last_id_key = hash_key(f"__last_id__:{name_prefix}")
+        last_scanned = int(new_state.get(last_id_key, base_id - 1))
+
+        current_id = last_scanned + 1
+        highest_confirmed = last_scanned
+        consecutive_misses = 0
+        requests_made = 0
         found = 0
 
-        for offset in range(-range_before, range_after + 1):
-            candidate_id = base_id + offset
-            url = template.format(id=f"{candidate_id:012d}")
-            checked += 1
+        while consecutive_misses < miss_limit and requests_made < max_requests:
+            url = template.format(id=f"{current_id:012d}")
+            requests_made += 1
             try:
                 html = fetch(url)
             except Exception:
-                continue  # 存在しないIDは静かにスキップ
-
-            if not any(k in html for k in keywords):
+                consecutive_misses += 1
+                current_id += 1
                 continue
 
-            found += 1
+            consecutive_misses = 0
+            highest_confirmed = current_id
             seen_any = True
 
-            now_out_of_stock = any(m in html for m in markers)
-            now_in_stock = not now_out_of_stock
+            if any(k in html for k in keywords):
+                found += 1
+                now_out_of_stock = any(m in html for m in markers)
+                now_in_stock = not now_out_of_stock
 
-            key = hash_key(url)
-            prev_status = new_state.get(key)
-            prev_in_stock = prev_status == "in"
+                key = hash_key(url)
+                prev_status = new_state.get(key)
+                prev_in_stock = prev_status == "in"
 
-            print(f"[item] ID探索{key[:6]}: {'在庫あり' if now_in_stock else '在庫なし'}")
+                print(f"[item] ID探索{key[:6]}: {'在庫あり' if now_in_stock else '在庫なし'}")
 
-            if now_in_stock and not prev_in_stock:
-                notifications.append(f"🎉 入荷通知\n{name_prefix}\n{url}")
+                if now_in_stock and not prev_in_stock:
+                    notifications.append(f"🎉 入荷通知\n{name_prefix}\n{url}")
 
-            new_state[key] = "in" if now_in_stock else "out"
+                new_state[key] = "in" if now_in_stock else "out"
 
-        print(f"[info] ID探索{ti}: {checked}件チェック、{found}件該当")
+            current_id += 1
+
+        new_state[last_id_key] = str(highest_confirmed)
+        print(f"[info] ID探索{ti}: {requests_made}件チェック、最新確認ID更新、該当{found}件")
 
     return seen_any
-
 
 def load_state() -> dict:
     if STATE_FILE.exists():
