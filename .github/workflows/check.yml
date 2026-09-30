@@ -42,6 +42,7 @@ jobs:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           MONITOR_URLS_JSON: ${{ secrets.MONITOR_URLS_JSON }}
           KEYWORDS_JSON: ${{ secrets.KEYWORDS_JSON }}
+          SINGLE_PAGE_TARGETS_JSON: ${{ secrets.SINGLE_PAGE_TARGETS_JSON }}
         run: python monitor.py
 
       - name: commit updated state
