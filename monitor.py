@@ -1,12 +1,16 @@
 """
 汎用 在庫監視 → LINE通知スクリプト
 
-2つの監視方式を持つ。
+3つの監視方式を持つ。
 1. 一覧ページ方式: MONITOR_URLS_JSON のページを取得し、KEYWORDS_JSON に一致する
    商品名を自動検出して監視する(一覧ページがHTMLで静的に商品を出力するサイト向け)。
 2. 個別ページ方式: SINGLE_PAGE_TARGETS_JSON に列挙した個別の商品ページを直接取得し、
    ページ内に「売り切れマーカー文言」が含まれるかどうかで在庫を判定する
    (一覧ページがJavaScriptで動的描画されるなど、方式1が使えないサイト向け)。
+3. ID探索方式: ID_PROBE_TARGETS_JSON に設定した基準IDの前後を実際に1件ずつ取得し、
+   ページ内にキーワードが含まれるものだけを対象として在庫判定する
+   (一覧ページ・個別ページのどちらも使えず、商品IDが連番で採番されるサイト向け。
+   実験的な方式のため、まずログで検出精度を確認しながら運用する)。
 
 監視対象URL・キーワード・マーカー文言はコードに埋め込まず、環境変数(GitHub Secrets)経由で受け取る。
 ログにも監視対象の実データ(URL・商品名・キーワード)を出力しない。
@@ -31,6 +35,7 @@ try:
     MONITOR_URLS = json.loads(os.environ.get("MONITOR_URLS_JSON", "[]"))
     KEYWORDS = json.loads(os.environ.get("KEYWORDS_JSON", "[]"))
     SINGLE_PAGE_TARGETS = json.loads(os.environ.get("SINGLE_PAGE_TARGETS_JSON", "[]"))
+    ID_PROBE_TARGETS = json.loads(os.environ.get("ID_PROBE_TARGETS_JSON", "[]"))
 except json.JSONDecodeError:
     print("[エラー] 設定用Secretsの形式が不正です。", file=sys.stderr)
     sys.exit(1)
@@ -159,6 +164,61 @@ def run_single_page_style(new_state: dict, notifications: list) -> bool:
     return seen_any
 
 
+# ---- 方式3: ID探索方式(実験的) ----
+
+def run_id_probe_style(new_state: dict, notifications: list) -> bool:
+    """基準IDの前後を実際に1件ずつ取得し、キーワードが含まれるものだけ在庫判定する。
+    存在しないID(404等)は静かにスキップする。"""
+    seen_any = False
+    for ti, target in enumerate(ID_PROBE_TARGETS, start=1):
+        template = target.get("url_template")
+        base_id = target.get("base_id")
+        range_before = int(target.get("range_before", 0))
+        range_after = int(target.get("range_after", 20))
+        keywords = target.get("keywords", [])
+        markers = target.get("out_of_stock_markers", [])
+        name_prefix = target.get("name", f"ID探索対象{ti}")
+
+        if not template or base_id is None:
+            continue
+
+        checked = 0
+        found = 0
+
+        for offset in range(-range_before, range_after + 1):
+            candidate_id = base_id + offset
+            url = template.format(id=f"{candidate_id:012d}")
+            checked += 1
+            try:
+                html = fetch(url)
+            except Exception:
+                continue  # 存在しないIDは静かにスキップ
+
+            if not any(k in html for k in keywords):
+                continue
+
+            found += 1
+            seen_any = True
+
+            now_out_of_stock = any(m in html for m in markers)
+            now_in_stock = not now_out_of_stock
+
+            key = hash_key(url)
+            prev_status = new_state.get(key)
+            prev_in_stock = prev_status == "in"
+
+            print(f"[item] ID探索{key[:6]}: {'在庫あり' if now_in_stock else '在庫なし'}")
+
+            if now_in_stock and not prev_in_stock:
+                notifications.append(f"🎉 入荷通知\n{name_prefix}\n{url}")
+
+            new_state[key] = "in" if now_in_stock else "out"
+
+        print(f"[info] ID探索{ti}: {checked}件チェック、{found}件該当")
+
+    return seen_any
+
+
 def load_state() -> dict:
     if STATE_FILE.exists():
         try:
@@ -198,9 +258,10 @@ def main() -> None:
 
     seen_list = run_list_style(new_state, notifications)
     seen_single = run_single_page_style(new_state, notifications)
+    seen_probe = run_id_probe_style(new_state, notifications)
 
-    if not seen_list and not seen_single:
-        print("[警告] どちらの方式でも対象が1件も見つかりませんでした。")
+    if not seen_list and not seen_single and not seen_probe:
+        print("[警告] どの方式でも対象が1件も見つかりませんでした。")
 
     for msg in notifications:
         send_line_broadcast(msg)
